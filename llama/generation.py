@@ -137,6 +137,7 @@ class Llama:
         top_p: float = 0.9,
         logprobs: bool = False,
         echo: bool = False,
+	output_hidden_states: bool = False,
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
         Generate text sequences based on provided prompts using the language generation model.
@@ -177,7 +178,7 @@ class Llama:
         eos_reached = torch.tensor([False] * bsz, device="cuda")
         input_text_mask = tokens != pad_id
         if min_prompt_len == total_len:
-            logits = self.model.forward(tokens, prev_pos)
+            logits, hidden_states = self.model.forward(tokens, prev_pos, output_hidden_states)
             token_logprobs = -F.cross_entropy(
                 input=logits.transpose(1, 2),
                 target=tokens,
@@ -186,7 +187,7 @@ class Llama:
             )
 
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits, hidden_states = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos, output_hidden_states)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -230,7 +231,11 @@ class Llama:
                 probs = probs[:eos_idx] if logprobs else None
             out_tokens.append(toks)
             out_logprobs.append(probs)
-        return (out_tokens, out_logprobs if logprobs else None)
+        return (
+	    out_tokens,
+	    out_logprobs if logprobs else None,
+	    hidden_states if output_hidden_states else None,
+	)
 
     def text_completion(
         self,
@@ -264,7 +269,7 @@ class Llama:
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        generation_tokens, generation_logprobs = self.generate(
+        generation_tokens, generation_logprobs, hidden_states = self.generate(
             prompt_tokens=prompt_tokens,
             max_gen_len=max_gen_len,
             temperature=temperature,
@@ -363,7 +368,7 @@ class Llama:
             )
             prompt_tokens.append(dialog_tokens)
 
-        generation_tokens, generation_logprobs = self.generate(
+        generation_tokens, generation_logprobs, hidden_states = self.generate(
             prompt_tokens=prompt_tokens,
             max_gen_len=max_gen_len,
             temperature=temperature,

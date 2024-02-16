@@ -469,7 +469,11 @@ class Transformer(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int):
+    def forward(
+	self,
+	tokens: torch.Tensor,
+	start_pos: int,
+	output_last_hidden_state: bool = False):
         """
         Perform a forward pass through the Transformer model.
 
@@ -506,5 +510,6 @@ class Transformer(nn.Module):
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
+        last_hidden_state = h if output_last_hidden_state else None
         output = self.output(h).float()
-        return output
+        return output, last_hidden_state
