@@ -30,6 +30,15 @@ class ModelArgs:
     max_batch_size: int = 32
     max_seq_len: int = 2048
 
+    # When sampling from the model in autoregressive fashion, a KV cache to
+    # hold the kv values during the attention forward pass in previous
+    # iterations saves a lot of time. When using this as an embedding model,
+    # however, we pass the entire sequence as input to a single model.forward
+    # call. In this case, the kv cache has no purpose and just takes up space
+    # (and "forces" a fixed max_batch_size on my inputs). When use_kv_cache is
+    # set to False, no KV cache is used during inference.
+    use_kv_cache: bool = True
+
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -203,6 +212,7 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
+        self.use_kv_cache = args.use_kv_cache
 
         self.wq = ColumnParallelLinear(
             args.dim,
@@ -233,22 +243,23 @@ class Attention(nn.Module):
             init_method=lambda x: x,
         )
 
-        self.cache_k = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-        self.cache_v = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
+        if self.use_kv_cache:
+            self.cache_k = torch.zeros(
+                (
+                    args.max_batch_size,
+                    args.max_seq_len,
+                    self.n_local_kv_heads,
+                    self.head_dim,
+                )
+            ).cuda()
+            self.cache_v = torch.zeros(
+                (
+                    args.max_batch_size,
+                    args.max_seq_len,
+                    self.n_local_kv_heads,
+                    self.head_dim,
+                )
+            ).cuda()
 
     def forward(
         self,
@@ -279,14 +290,18 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        if self.use_kv_cache:
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
+        else:
+            keys = xk
+            values = xv
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)

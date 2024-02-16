@@ -57,6 +57,7 @@ class Llama:
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
+        use_kv_cache: bool = True,
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -111,6 +112,7 @@ class Llama:
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
+            use_kv_cache=use_kv_cache,
             **params,
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
