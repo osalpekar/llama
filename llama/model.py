@@ -448,6 +448,7 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+        self.use_kv_cache = params.use_kv_cache
 
         self.tok_embeddings = ParallelEmbedding(
             params.vocab_size, params.dim, init_method=lambda x: x
@@ -498,14 +499,15 @@ class Transformer(nn.Module):
 
             mask = torch.triu(mask, diagonal=1)
 
-            # When performing key-value caching, we compute the attention scores
-            # only for the new sequence. Thus, the matrix of scores is of size
-            # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # j > cache_len + i, since row i corresponds to token cache_len + i.
-            mask = torch.hstack([
-                torch.zeros((seqlen, start_pos), device=tokens.device),
-                mask
-            ]).type_as(h)
+            if self.use_kv_cache:
+                # When performing key-value caching, we compute the attention scores
+                # only for the new sequence. Thus, the matrix of scores is of size
+                # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
+                # j > cache_len + i, since row i corresponds to token cache_len + i.
+                mask = torch.hstack([
+                    torch.zeros((seqlen, start_pos), device=tokens.device),
+                    mask
+                ]).type_as(h)
 
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
