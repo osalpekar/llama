@@ -312,7 +312,9 @@ class Attention(nn.Module):
         values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            if not self.use_kv_cache:
+                mask = mask.permute(1, 0, 2, 3)
+            scores = scores + mask # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
@@ -471,10 +473,12 @@ class Transformer(nn.Module):
 
     @torch.inference_mode()
     def forward(
-	self,
-	tokens: torch.Tensor,
-	start_pos: int,
-	output_last_hidden_state: bool = False):
+        self,
+        tokens: torch.Tensor,
+        start_pos: int,
+        output_last_hidden_state: bool = False,
+        attn_mask: torch.Tensor = None,
+    ):
         """
         Perform a forward pass through the Transformer model.
 
@@ -493,11 +497,31 @@ class Transformer(nn.Module):
 
         mask = None
         if seqlen > 1:
-            mask = torch.full(
-                (seqlen, seqlen), float("-inf"), device=tokens.device
-            )
+            if attn_mask is not None:
+                mask = torch.full(
+                    (1, 1, seqlen, seqlen), 1.0, device=torch.device('cpu')
+                )
+                mask = mask.to(torch.float32).triu(diagonal=start_pos+1).type_as(h)
 
-            mask = torch.triu(mask, diagonal=1)
+                # attn_mask is shaped (bsz, seqlen)
+                attn_mask = attn_mask[:, None, :] # (bsz, 1, seqlen)
+                attn_mask = attn_mask.repeat(1, seqlen, 1) # (bsz, seqlen, seqlen)
+
+                causal_mask = mask.eq(0.0) # (1, 1, seqlen, seqlen)
+
+                full_mask = attn_mask * causal_mask # (1, bsz, seqlen, seqlen)
+
+                full_mask = full_mask.eq(0.0)
+                mask = mask.masked_fill(full_mask, float("-inf")).type_as(h)
+                # mask ends up having shape (1, bsz, seqlen, seqlen)
+                # it combines the causal mask and attention mask such that it
+                # has a -infinity value for look-ahead tokens as well as
+                # padding tokens, and zero everywhere else.
+            else:
+                mask = torch.full(
+                    (1, 1, seqlen, seqlen), float("-inf"), device=torch.device('cpu')
+                )
+                mask = mask.to(torch.float32).triu(diagonal=start_pos+1).type_as(h)
 
             if self.use_kv_cache:
                 # When performing key-value caching, we compute the attention scores
@@ -506,7 +530,7 @@ class Transformer(nn.Module):
                 # j > cache_len + i, since row i corresponds to token cache_len + i.
                 mask = torch.hstack([
                     torch.zeros((seqlen, start_pos), device=tokens.device),
-                    mask
+                    mask.squeeze()
                 ]).type_as(h)
 
         for layer in self.layers:
